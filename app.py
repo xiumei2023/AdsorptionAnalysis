@@ -1,71 +1,95 @@
 import os
-import sys
+import numpy as np
 import pandas as pd
-import streamlit as st
-from PIL import Image
+import matplotlib.pyplot as plt
+from lmfit import Model
 
-# Import analysis functions (ensure that the path is correct)
-sys.path.append('C:/Users/silkc/Documents/CHE534/Final project/Coding')
-from kinetics import run_kinetic_fitting
-from isotherms import run_isotherm_fitting
-from ftir import run_ftir_analysis
-from xrd import run_xrd_analysis
-
-# Streamlit Interface
-st.title("Data Analysis Interface for Kinetics, Isotherm, FTIR, and XRD")
-
-# File upload and output directory input (defined once)
-uploaded_file = st.file_uploader("Upload your data file (Excel format)", type=["xlsx"], key="file_uploader_main")
-output_dir = st.text_input("Enter output directory", "C:/Users/silkc/Documents/CHE534/Final project/Results", key="output_dir")
-analysis_type = st.sidebar.selectbox("Select Analysis Type", ["Kinetics", "Isotherm", "FTIR", "XRD"], key="analysis_type_select")
-st.write(f"Selected Analysis: **{analysis_type}**")
-
-if uploaded_file:
-    # Create a folder based on the uploaded file's name (without extension)
-    file_name_without_extension = os.path.splitext(uploaded_file.name)[0]
-    folder_path = os.path.join(output_dir, file_name_without_extension)
-
-    # Ensure the output directory exists
-    os.makedirs(folder_path, exist_ok=True)
-
-    # Save uploaded file to the newly created folder
-    file_path = os.path.join(folder_path, uploaded_file.name)
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+def run_kinetic_fitting(file_path, output_dir):
+    figures_dir = os.path.join(output_dir, 'Figures_Kinetics')
+    os.makedirs(figures_dir, exist_ok=True)  # Create directory for figures if it doesn't exist
+    results_list = []
     
-    st.write(f"File uploaded successfully and saved to {file_path}.")
-    
-    # Run analysis based on selected type
-    if st.button("Run Analysis"):
-        summary_df = None  # Initialize placeholder for summary
-        figure_paths = []
+    # Define pseudo-first-order and pseudo-second-order models
+    def pseudo_first_order(t, q_e, k1):
+        return q_e * (1 - np.exp(-k1 * t))
+
+    def pseudo_second_order(t, q_e, k2):
+        return (q_e**2 * k2 * t) / (1 + q_e * k2 * t)
+
+    # Load the Excel file and get sheet names
+    excel_data = pd.ExcelFile(file_path)
+    sheet_names = excel_data.sheet_names
+
+    # List to store the paths of the figures for display in Streamlit
+    figure_paths = []
+
+    for sheet in sheet_names:
+        # Read data from the first two columns, skip the first row
+        data = pd.read_excel(file_path, sheet_name=sheet, skiprows=1, usecols=[0, 1])
+        data.columns = ['time(min)', 'qt(mg/g)']
+        
+        # Ensure required columns are present
+        t_data = data['time(min)'].dropna().values
+        q_data = data['qt(mg/g)'].dropna().values
+        
+        # Model setup with lmfit for enhanced control
+        first_order_model = Model(pseudo_first_order)
+        first_order_params = first_order_model.make_params(q_e=np.max(q_data), k1=0.1)
+        
+        second_order_model = Model(pseudo_second_order)
+        second_order_params = second_order_model.make_params(q_e=np.max(q_data), k2=0.001)
+        
+        # Create a new figure only once per sheet
+        fig, ax = plt.subplots(figsize=(8, 6))  # Set figure size for consistency
+        ax.plot(t_data, q_data, 'bo', label="Data")
 
         try:
-            if analysis_type == "Kinetics":
-                # Run Kinetics analysis and get results and figure paths
-                summary_df, figure_paths = run_kinetic_fitting(file_path, output_dir)
-
-            elif analysis_type == "Isotherm":
-                # Run Isotherm analysis and get results and figure paths
-                summary_df, figure_paths = run_isotherm_fitting(file_path, output_dir)
-
-            elif analysis_type == "FTIR":
-                summary_df, figure_paths = run_ftir_analysis(file_path, output_dir)
-
-            elif analysis_type == "XRD":
-                summary_df, figure_paths = run_xrd_analysis(file_path, output_dir)
-
-            # Display figures (individual and composite)
-            if figure_paths:
-                for fig_path in figure_paths:
-                    image = Image.open(fig_path)
-                    st.image(image, caption=os.path.basename(fig_path), use_column_width=True)
-
-            # Display fitting results
-            if summary_df is not None:
-                st.write(summary_df)
-            else:
-                st.error("No results to display.")
+            # Fit and plot pseudo-first-order model
+            first_order_result = first_order_model.fit(q_data, t=t_data, params=first_order_params)
+            ax.plot(t_data, first_order_result.best_fit, 'r-', label=f"1st Order Fit: q_e={first_order_result.params['q_e'].value:.2f}, k1={first_order_result.params['k1'].value:.2f}")
+            r_squared_1st = 1 - first_order_result.residual.var() / np.var(q_data)
+            results_list.append({
+                'Sheet': sheet, 
+                'Model': 'Pseudo First Order', 
+                'q_e': first_order_result.params['q_e'].value, 
+                'k': first_order_result.params['k1'].value, 
+                'R^2': r_squared_1st
+            })
+            
+            # Fit and plot pseudo-second-order model
+            second_order_result = second_order_model.fit(q_data, t=t_data, params=second_order_params)
+            ax.plot(t_data, second_order_result.best_fit, 'g--', label=f"2nd Order Fit: q_e={second_order_result.params['q_e'].value:.2f}, k2={second_order_result.params['k2'].value:.2f}")
+            r_squared_2nd = 1 - second_order_result.residual.var() / np.var(q_data)
+            results_list.append({
+                'Sheet': sheet, 
+                'Model': 'Pseudo Second Order', 
+                'q_e': second_order_result.params['q_e'].value, 
+                'k': second_order_result.params['k2'].value, 
+                'R^2': r_squared_2nd
+            })
 
         except Exception as e:
-            st.error(f"An error occurred during analysis: {e}")
+            print(f"Error fitting model for sheet '{sheet}': {e}")
+            continue
+
+        # Customize and save each plot as one figure per sheet
+        ax.set_xlabel('Time (min)')
+        ax.set_ylabel('Adsorption Amount (qt)')
+        ax.legend()
+        ax.set_title(f'Kinetic Model Fits for {sheet}')
+        
+        # Save the figure as a PNG file
+        fig_path = os.path.join(figures_dir, f'Kinetic_Fit_{sheet}.png')
+        fig.savefig(fig_path)
+        plt.close(fig)  # Close the figure after saving to avoid duplicates
+
+        # Append the path of the individual figure to the list
+        figure_paths.append(fig_path)
+
+    # Convert results to DataFrame
+    summary_df = pd.DataFrame(results_list)
+    if summary_df.empty:
+        print("No valid results were generated.")
+        return None, figure_paths  # Return figure paths if no results
+
+    return summary_df, figure_paths  # Return summary DataFrame and the list of figure paths
